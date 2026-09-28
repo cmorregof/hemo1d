@@ -72,3 +72,17 @@ def test_mesh_convergence():
     rates = np.log2(np.array(errs[:-1]) / np.array(errs[1:]))
     assert rates.min() > 1.0, f"errors {errs}, rates {rates}"
     assert errs[-1] < 5.0  # Pa: below 0.05 mmHg on the finest mesh
+
+
+def test_agreement_with_openbf_carotid():
+    """Cross-code check: on the Boileau et al. (2015) common-carotid case with identical inputs,
+    inlet pressure must agree with openBF's reference waveform to within 2% of the pulse pressure."""
+    import os
+    net, v, _, q = common_carotid(n_cells=63)
+    rec = run_cycles(net, {"carotid": [0.0]}, n_cycles=8, period=q.period, sample_every=2)
+    ref = np.loadtxt(os.path.join(os.path.dirname(__file__), "..", "data", "openbf_ref_cca_carotid_P.dat"))
+    tt = (rec["t"] - rec["t"][0]) % q.period
+    order = np.argsort(tt)
+    p = np.interp(ref[:, 0] % q.period, tt[order], rec[("carotid", 0.0)]["p"][order])
+    rms = np.sqrt(np.mean((p - ref[:, 1]) ** 2))
+    assert rms < 0.02 * (ref[:, 1].max() - ref[:, 1].min()), f"RMS {rms:.0f} Pa"

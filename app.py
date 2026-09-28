@@ -6,6 +6,8 @@ import numpy as np
 import streamlit as st
 
 from hemo1d import MMHG, Network, Windkessel3, blood_vessel, half_sine_inflow, run_cycles, windkessel_0d
+from hemo1d.model import MU, RHO
+from hemo1d.womersley import effective_zeta, friction_1d, womersley_from_flow, womersley_number
 
 C1, C2, C3 = "#2a78d6", "#eb6834", "#1baf7a"
 plt.rcParams.update({"axes.spines.top": False, "axes.spines.right": False, "axes.grid": True,
@@ -13,8 +15,9 @@ plt.rcParams.update({"axes.spines.top": False, "axes.spines.right": False, "axes
 
 st.set_page_config(page_title="hemo1d explorer", layout="wide")
 st.title("hemo1d — reduced-order blood flow in a compliant artery")
-st.caption("1D area–flow model (Lax–Wendroff) with a 3-element Windkessel outlet, compared with a "
-           "0D lumped model. Default parameters: common carotid of Boileau et al. (2015).")
+st.caption("Three rungs of the model hierarchy for one vessel: full-order radial viscous profile (axisymmetric "
+           "Navier–Stokes, Womersley), 1D area–flow model (Lax–Wendroff) with a 3-element Windkessel outlet, and a 0D "
+           "lumped model. Default parameters: common carotid of Boileau et al. (2015).")
 
 with st.sidebar:
     st.header("Vessel")
@@ -33,11 +36,12 @@ with st.sidebar:
     st.header("Numerics")
     n = st.select_slider("cells", [20, 40, 80, 160], 40)
     cycles = st.slider("cycles", 2, 8, 4)
+    zeta = st.select_slider("1D profile parameter ζ", [2.0, 4.0, 9.0], 2.0)
 
 
 @st.cache_data(show_spinner="integrating…")
-def simulate(L, r, h, E, R1, C, R2, qpk, qb, T, n, cycles):
-    v = blood_vessel("v", L, r / 10.0, h, E, n_cells=n)
+def simulate(L, r, h, E, R1, C, R2, qpk, qb, T, n, cycles, zeta):
+    v = blood_vessel("v", L, r / 10.0, h, E, n_cells=n, zeta=zeta)
     wk = Windkessel3(R1=R1 * 1e8, C=C * 1e-10, R2=R2 * 1e9)
     q = half_sine_inflow(qpk * 1e-6, qb * 1e-6, t_sys=0.3 * T / 1.1, period=T)
     net = Network([v], q, outlets={"v": wk})
@@ -54,7 +58,7 @@ def simulate(L, r, h, E, R1, C, R2, qpk, qb, T, n, cycles):
     return out
 
 
-res = simulate(L, r, h, E, R1, C, R2, qpk, qb, T, n, cycles)
+res = simulate(L, r, h, E, R1, C, R2, qpk, qb, T, n, cycles, zeta)
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("pulse wave speed c₀", f"{res['c0']:.2f} m/s")
@@ -84,6 +88,34 @@ ax.set(xlabel="time in cycle [s]", ylabel="inlet pressure [mmHg]",
        title="Model complexity: does the 1D wave propagation matter for the inlet pressure?")
 ax.legend(frameon=False)
 st.pyplot(fig, use_container_width=True)
+
+# ---- full-order radial profile vs 1D closure
+st.subheader("Full-order vs reduced: the viscous closure")
+Rm = r * 1e-3
+tt = np.linspace(0, T, 200, endpoint=False)
+Qt = np.array([half_sine_inflow(qpk * 1e-6, qb * 1e-6, t_sys=0.3 * T / 1.1, period=T)(x) for x in tt])
+rr = np.linspace(0, Rm, 61)
+w = womersley_from_flow(tt, Qt, Rm, r=rr)
+z_eff = effective_zeta(Qt, w["tau_w"], Rm)
+alpha = womersley_number(Rm, 2 * np.pi / T, MU / RHO)
+k1, k2 = st.columns(2)
+k1.metric("Womersley number α", f"{alpha:.2f}")
+k2.metric("effective ζ from the full-order model", f"{z_eff:.2f}", help="ζ = 2 is Poiseuille; ζ → ∞ is a flat profile")
+c1, c2 = st.columns(2)
+fig, ax = plt.subplots(figsize=(5.5, 3.4))
+Am = np.pi * Rm**2
+for i, lab, c in zip([np.argmax(Qt), int(0.5 * len(tt)), int(0.85 * len(tt))], ("peak flow", "mid cycle", "late cycle"), (C1, C2, C3)):
+    ax.plot(rr / Rm, w["u"][i] * 100, color=c, label=lab)
+    ax.plot(rr / Rm, (zeta + 2) / zeta * Qt[i] / Am * (1 - (rr / Rm) ** zeta) * 100, ":", color=c, lw=1.2)
+ax.set(xlabel="r / R", ylabel="u [cm/s]", title=f"Velocity profiles: full-order (solid) vs 1D ζ = {zeta:g} (dotted)")
+ax.legend(frameon=False)
+c1.pyplot(fig, use_container_width=True)
+fig, ax = plt.subplots(figsize=(5.5, 3.4))
+ax.plot(tt, -2 * np.pi * Rm * w["tau_w"] / RHO * 1e3, color=C1, label="full-order (Womersley)")
+ax.plot(tt, friction_1d(Qt, Am, zeta) * 1e3, color=C2, label=f"1D closure, ζ = {zeta:g}")
+ax.set(xlabel="time in cycle [s]", ylabel="−K_R Q/A [10⁻³ m²/s²]", title="Viscous friction term in the momentum equation")
+ax.legend(frameon=False)
+c2.pyplot(fig, use_container_width=True)
 
 with st.expander("Model"):
     st.latex(r"\partial_t A + \partial_x Q = 0, \qquad \partial_t Q + \partial_x\!\left(\frac{Q^2}{A}\right) + \frac{A}{\rho}\,\partial_x p = -K_R \frac{Q}{A}")
